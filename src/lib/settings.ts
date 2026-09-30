@@ -1,4 +1,4 @@
-const KEY = 'avelon-settings'
+const KEY = 'avalon-settings'
 
 export interface AppSettings {
   talkSec: number

@@ -1,8 +1,26 @@
 import { TEAM_SIZES } from '../data/setups'
 import type { GameState, MissionOutcome, Phase, VoteChoice } from './game'
 
-const PLAYERS_KEY = 'avelon-saved-players'
-const GAME_KEY = 'avelon-active-game'
+const PLAYERS_KEY = 'avalon-saved-players'
+const GAME_KEY = 'avalon-active-game'
+
+const RENAMED_KEYS = ['saved-players', 'active-game', 'settings']
+
+/** Carry data saved under the old misspelled `avelon-*` keys over to `avalon-*`. */
+export function migrateStorageKeys() {
+  try {
+    for (const k of RENAMED_KEYS) {
+      const old = localStorage.getItem(`avelon-${k}`)
+      if (old === null) continue
+      if (localStorage.getItem(`avalon-${k}`) === null) {
+        localStorage.setItem(`avalon-${k}`, old)
+      }
+      localStorage.removeItem(`avelon-${k}`)
+    }
+  } catch {
+    // Storage unavailable (private mode); nothing to migrate.
+  }
+}
 
 export interface SavedPlayers {
   count: number

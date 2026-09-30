@@ -205,7 +205,7 @@ export default function App() {
     if (!game || game.phase === 'ended') return
 
     const trap = () => {
-      window.history.pushState({ avelonGame: true }, '')
+      window.history.pushState({ avalonGame: true }, '')
     }
     trap()
 
