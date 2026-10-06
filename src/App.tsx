@@ -459,11 +459,30 @@ export default function App() {
       setScreen('vote')
       return
     }
+    if (settings.inquiryEnabled && canPerformInquiry(game)) {
+      const holder = inquiryHolder(game)
+      alert(
+        holder
+          ? `استعلام هنوز گرفته نشده — نوبت ${holder.name}. اول استعلام را بزنید.`
+          : 'استعلام هنوز گرفته نشده. اول استعلام را بزنید.',
+      )
+      return
+    }
     setScreen('vote-setup')
   }
 
   function confirmStartMission() {
     if (!game) return
+    if (settings.inquiryEnabled && canPerformInquiry(game)) {
+      const holder = inquiryHolder(game)
+      alert(
+        holder
+          ? `استعلام هنوز گرفته نشده — نوبت ${holder.name}. اول استعلام را بزنید.`
+          : 'استعلام هنوز گرفته نشده. اول استعلام را بزنید.',
+      )
+      setScreen('lobby')
+      return
+    }
     const size =
       (game.missionSizes?.length === 5
         ? game.missionSizes
@@ -2221,6 +2240,22 @@ function MapStage({
         )}
 
         <div className="map-stage__dock">
+          {inquiryEnabled && inquiryReady && (
+            <button
+              type="button"
+              className="map-inquiry-alert"
+              onClick={onInquiry}
+            >
+              <span className="map-inquiry-alert__pulse" aria-hidden />
+              <span className="map-inquiry-alert__kicker">استعلام آزاد شد</span>
+              <strong className="map-inquiry-alert__title">
+                {inquiryName ? `نوبت ${inquiryName}` : 'الان استعلام بگیرید'}
+              </strong>
+              <span className="map-inquiry-alert__hint">
+                قبل از مأموریت بعدی استعلام را انجام دهید
+              </span>
+            </button>
+          )}
           {(leaderName || inquiryName) && (
             <div className="map-stage__status">
               {leaderName && (
@@ -2230,7 +2265,7 @@ function MapStage({
                 </div>
               )}
               {inquiryName && (
-                <div className="map-chip">
+                <div className={`map-chip ${inquiryReady ? 'is-hot' : ''}`}>
                   <span>استعلام</span>
                   <strong>{inquiryName}</strong>
                 </div>
@@ -2258,18 +2293,25 @@ function MapStage({
                 onClick={onInquiry}
                 disabled={inquiryDisabled}
               >
-                <span className="map-action__label">استعلام</span>
+                <span className="map-action__label">
+                  استعلام
+                  {inquiryReady && <span className="map-action__badge">الان</span>}
+                </span>
                 <span className="map-action__desc">{inquiryHint}</span>
               </button>
             )}
             <button
               type="button"
-              className="map-action"
+              className={`map-action ${inquiryEnabled && inquiryReady ? 'is-blocked' : ''}`}
               onClick={onMission}
               disabled={missionDisabled}
             >
               <span className="map-action__label">{missionLabel}</span>
-              <span className="map-action__desc">خورشید / جمجمه</span>
+              <span className="map-action__desc">
+                {inquiryEnabled && inquiryReady
+                  ? 'اول استعلام لازم است'
+                  : 'خورشید / جمجمه'}
+              </span>
             </button>
             <button type="button" className="map-action" onClick={onTimer}>
               <span className="map-action__label">تایمر</span>
@@ -2285,43 +2327,41 @@ function MapStage({
             </button>
           </div>
 
-          <div className="map-stage__reject" aria-label="رد تیم">
-            <div className="map-stage__reject-head">
-              <p>رد پیشنهاد تیم</p>
-              <strong>
-                {rejectionCount === 0 ? 'خالی' : `${toFa(rejectionCount)} از ۵`}
-              </strong>
-            </div>
-            <div className="map-stage__reject-row">
+          <div className="map-reject-bar" aria-label="رد تیم">
+            <span className="map-reject-bar__label">رد تیم</span>
+            <div className="map-reject-bar__pips" aria-hidden>
               {[1, 2, 3, 4, 5].map((n) => (
                 <span
                   key={n}
-                  className={`map-reject ${rejectionCount >= n ? 'is-on' : ''} ${
-                    n === 5 ? 'is-fatal' : ''
-                  }`}
-                >
-                  {toFa(n)}
-                </span>
+                  className={`map-reject-bar__pip ${
+                    rejectionCount >= n ? 'is-on' : ''
+                  } ${n === 5 ? 'is-fatal' : ''}`}
+                />
               ))}
             </div>
-            <div className="map-stage__reject-actions">
-              <button
-                type="button"
-                className="map-stage__close"
-                onClick={onBumpRejection}
-                disabled={rejectionBumpDisabled}
-              >
-                تیم رأی نیاورد
-              </button>
-              <button
-                type="button"
-                className="map-stage__close"
-                onClick={onUndoRejection}
-                disabled={rejectionUndoDisabled}
-              >
-                یکی کم کن
-              </button>
-            </div>
+            <strong className="map-reject-bar__count">
+              {toFa(rejectionCount)}/{toFa(5)}
+            </strong>
+            <button
+              type="button"
+              className="map-reject-bar__btn"
+              onClick={onUndoRejection}
+              disabled={rejectionUndoDisabled}
+              aria-label="یکی کم کن"
+              title="یکی کم کن"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="map-reject-bar__btn map-reject-bar__btn--add"
+              onClick={onBumpRejection}
+              disabled={rejectionBumpDisabled}
+              aria-label="تیم رأی نیاورد"
+              title="تیم رأی نیاورد"
+            >
+              +
+            </button>
           </div>
         </div>
       </div>
