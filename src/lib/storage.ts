@@ -1,8 +1,11 @@
 import { TEAM_SIZES } from '../data/setups'
 import type { GameState, MissionOutcome, Phase, VoteChoice } from './game'
+import { sanitizeInquiryState } from './game'
+import { readSealedJson, writeSealedJson } from './seal'
 
 const PLAYERS_KEY = 'avalon-saved-players'
 const GAME_KEY = 'avalon-active-game'
+const SETTINGS_KEY = 'avalon-settings'
 
 const RENAMED_KEYS = ['saved-players', 'active-game', 'settings']
 
@@ -17,9 +20,18 @@ export function migrateStorageKeys() {
       }
       localStorage.removeItem(`avelon-${k}`)
     }
+    // Re-seal any still-plain JSON under the current keys.
+    resealIfLegacy(PLAYERS_KEY)
+    resealIfLegacy(GAME_KEY)
+    resealIfLegacy(SETTINGS_KEY)
   } catch {
     // Storage unavailable (private mode); nothing to migrate.
   }
+}
+
+function resealIfLegacy(key: string) {
+  const opened = readSealedJson<unknown>(key)
+  if (opened?.legacy) writeSealedJson(key, opened.value)
 }
 
 export interface SavedPlayers {
@@ -35,9 +47,9 @@ export interface ActiveSession {
 
 export function loadSavedPlayers(): SavedPlayers | null {
   try {
-    const raw = localStorage.getItem(PLAYERS_KEY)
-    if (!raw) return null
-    const data = JSON.parse(raw) as SavedPlayers
+    const opened = readSealedJson<SavedPlayers>(PLAYERS_KEY)
+    if (!opened) return null
+    const data = opened.value
     if (
       !data ||
       typeof data.count !== 'number' ||
@@ -47,10 +59,12 @@ export function loadSavedPlayers(): SavedPlayers | null {
     ) {
       return null
     }
-    return {
+    const saved: SavedPlayers = {
       count: data.count,
       names: data.names.map((n) => String(n ?? '')),
     }
+    if (opened.legacy) writeSealedJson(PLAYERS_KEY, saved)
+    return saved
   } catch {
     return null
   }
@@ -61,7 +75,7 @@ export function savePlayers(count: number, names: string[]) {
     count,
     names: names.map((n) => n.trim()),
   }
-  localStorage.setItem(PLAYERS_KEY, JSON.stringify(payload))
+  writeSealedJson(PLAYERS_KEY, payload)
 }
 
 function isPhase(v: unknown): v is Phase {
@@ -117,7 +131,14 @@ function isGameState(data: unknown): data is GameState {
 /** Safe screen to reopen after refresh — never leave a private reveal open. */
 export function resumeScreenFor(game: GameState, screen: string): string {
   if (game.phase === 'ended') {
-    if (screen === 'reveal' || screen === 'ended') return screen
+    if (
+      screen === 'reveal' ||
+      screen === 'ended' ||
+      screen === 'climax-evil' ||
+      screen === 'assassin-result'
+    ) {
+      return screen
+    }
     return 'reveal'
   }
   if (game.phase === 'deal') return 'deal'
@@ -128,9 +149,15 @@ export function resumeScreenFor(game: GameState, screen: string): string {
     case 'vote-setup':
     case 'vote':
     case 'vote-result':
+    case 'climax-evil':
+    case 'assassin-intro':
+    case 'assassin-pick':
+    case 'assassin-confirm':
+    case 'assassin-result':
     case 'end-confirm':
     case 'timer':
     case 'settings':
+    case 'leader-spin':
       return screen
     case 'vote-cast':
     case 'vote-confirm':
@@ -151,27 +178,44 @@ export function resumeScreenFor(game: GameState, screen: string): string {
 }
 
 function ensureMissionSizes(game: GameState): GameState {
+  let next = game
   if (
-    Array.isArray(game.missionSizes) &&
-    game.missionSizes.length === 5 &&
-    game.missionSizes.every((n) => typeof n === 'number')
+    !(
+      Array.isArray(game.missionSizes) &&
+      game.missionSizes.length === 5 &&
+      game.missionSizes.every((n) => typeof n === 'number')
+    )
   ) {
-    return game
+    const fallback = TEAM_SIZES[game.playerCount] ?? [2, 3, 2, 3, 3]
+    next = { ...next, missionSizes: [...fallback] }
   }
-  const fallback = TEAM_SIZES[game.playerCount] ?? [2, 3, 2, 3, 3]
-  return { ...game, missionSizes: [...fallback] }
+
+  // Older saves never had a leader ceremony — skip it if play already began.
+  if (
+    next.phase === 'play' &&
+    !next.leaderChosen &&
+    (next.vote != null || next.missions.some((m) => m !== 'pending'))
+  ) {
+    next = { ...next, leaderChosen: true }
+  }
+
+  return next
+}
+
+function prepareLoadedGame(game: GameState): GameState {
+  return sanitizeInquiryState(ensureMissionSizes(game))
 }
 
 export function loadActiveSession(): ActiveSession | null {
   try {
-    const raw = localStorage.getItem(GAME_KEY)
-    if (!raw) return null
-    const data = JSON.parse(raw) as Partial<ActiveSession>
+    const opened = readSealedJson<Partial<ActiveSession>>(GAME_KEY)
+    if (!opened) return null
+    const data = opened.value
     if (!data || !isGameState(data.game)) {
       localStorage.removeItem(GAME_KEY)
       return null
     }
-    const game = ensureMissionSizes(data.game)
+    const game = prepareLoadedGame(data.game)
     const screen =
       typeof data.screen === 'string'
         ? resumeScreenFor(game, data.screen)
@@ -180,21 +224,20 @@ export function loadActiveSession(): ActiveSession | null {
       typeof data.inqUntil === 'number' && data.inqUntil > Date.now()
         ? data.inqUntil
         : 0
-    return { game, screen, inqUntil }
+    const session: ActiveSession = { game, screen, inqUntil }
+    if (opened.legacy) writeSealedJson(GAME_KEY, session)
+    return session
   } catch {
     return null
   }
 }
 
 export function saveActiveSession(session: ActiveSession) {
-  localStorage.setItem(
-    GAME_KEY,
-    JSON.stringify({
-      game: session.game,
-      screen: session.screen,
-      inqUntil: session.inqUntil,
-    }),
-  )
+  writeSealedJson(GAME_KEY, {
+    game: session.game,
+    screen: session.screen,
+    inqUntil: session.inqUntil,
+  })
 }
 
 export function clearActiveSession() {

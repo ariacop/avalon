@@ -1,21 +1,34 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { LeaderWheel } from './components/LeaderWheel'
 import { RoleCard, ROLE_PORTRAITS } from './components/RoleCard'
 import { ROLES, type RoleId } from './data/roles'
 import { TEAM_SIZES, roleNamesList, needsTwoFails } from './data/setups'
 import {
   allVotesIn,
+  assignLeader,
+  canPerformInquiry,
   castVote,
   claimRoleSlot,
+  climaxKind,
+  completeInquiry,
+  completedMissions,
   createGame,
+  declareEvilWin,
   endGameReveal,
   finishVoteAndAdvance,
+  inquiryHolder,
+  inquiryTargets,
   markAbilitySeen,
   missionSummary,
+  pickFirstInquirerId,
   privateView,
+  rejectTeamProposal,
+  resolveAssassinShot,
   revealVote,
   shuffle,
   startVote,
   tallyVote,
+  undoTeamRejection,
   type GameState,
   type Player,
   type RoleSlot,
@@ -28,7 +41,10 @@ import {
   saveSettings,
   MIN_SEC,
   MAX_SEC,
+  MAP_BACKGROUNDS,
   type AppSettings,
+  type FirstInquirerMode,
+  type MapBgIndex,
 } from './lib/settings'
 import {
   clearActiveSession,
@@ -44,6 +60,7 @@ type Screen =
   | 'deal'
   | 'deal-pick'
   | 'deal-role'
+  | 'leader-spin'
   | 'lobby'
   | 'abilities'
   | 'ability-confirm'
@@ -57,6 +74,11 @@ type Screen =
   | 'vote-cast'
   | 'vote-confirm'
   | 'vote-result'
+  | 'climax-evil'
+  | 'assassin-intro'
+  | 'assassin-pick'
+  | 'assassin-confirm'
+  | 'assassin-result'
   | 'end-confirm'
   | 'reveal'
   | 'ended'
@@ -71,6 +93,7 @@ const SCREENS = new Set<Screen>([
   'deal',
   'deal-pick',
   'deal-role',
+  'leader-spin',
   'lobby',
   'abilities',
   'ability-confirm',
@@ -84,6 +107,11 @@ const SCREENS = new Set<Screen>([
   'vote-cast',
   'vote-confirm',
   'vote-result',
+  'climax-evil',
+  'assassin-intro',
+  'assassin-pick',
+  'assassin-confirm',
+  'assassin-result',
   'end-confirm',
   'reveal',
   'ended',
@@ -110,16 +138,32 @@ function bootFromStorage(): {
   game: GameState | null
   inqUntil: number
   votePad: VoteSlot[]
+  spinLeaderId: string | null
+  spinInquirerId: string | null
 } {
   const session = loadActiveSession()
   if (!session) {
-    return { screen: 'home', game: null, inqUntil: 0, votePad: [] }
+    return {
+      screen: 'home',
+      game: null,
+      inqUntil: 0,
+      votePad: [],
+      spinLeaderId: null,
+      spinInquirerId: null,
+    }
   }
-  const screen = SCREENS.has(session.screen as Screen)
+  let screen = SCREENS.has(session.screen as Screen)
     ? (session.screen as Screen)
     : session.game.phase === 'deal'
       ? 'deal'
       : 'lobby'
+
+  // Never reopen a private mid-flow on the spinner itself after refresh.
+  if (screen === 'leader-spin') screen = 'lobby'
+
+  const spinLeaderId = session.game.leaderId ?? null
+  const spinInquirerId = session.game.firstInquirerId ?? null
+
   return {
     screen,
     game: session.game,
@@ -128,6 +172,8 @@ function bootFromStorage(): {
       session.game.vote && (screen === 'vote' || screen === 'vote-result')
         ? shuffle([...session.game.vote.slots])
         : [],
+    spinLeaderId,
+    spinInquirerId,
   }
 }
 
@@ -145,21 +191,21 @@ export default function App() {
   const [voteOrder, setVoteOrder] = useState<VoteChoice[]>(['pass', 'fail'])
   const [pendingVote, setPendingVote] = useState<VoteChoice | null>(null)
   const [showGuide, setShowGuide] = useState(false)
+  const [guideTab, setGuideTab] = useState<'rules' | 'roles'>('rules')
   const [inqUntil, setInqUntil] = useState(resumed.inqUntil)
-  const [clock, setClock] = useState(() => Date.now())
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings())
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(() => loadSettings())
   const [timerPlayerId, setTimerPlayerId] = useState<string | null>(null)
   const [timerMode, setTimerMode] = useState<TimerMode>('talk')
   const [timerLeft, setTimerLeft] = useState(0)
   const [timerRunning, setTimerRunning] = useState(false)
+  const [spinLeaderId, setSpinLeaderId] = useState<string | null>(
+    resumed.spinLeaderId,
+  )
+  const [spinInquirerId, setSpinInquirerId] = useState<string | null>(
+    resumed.spinInquirerId,
+  )
   const lastBeepSec = useRef<number | null>(null)
-
-  useEffect(() => {
-    if (inqUntil <= Date.now()) return
-    const id = window.setInterval(() => setClock(Date.now()), 1000)
-    return () => window.clearInterval(id)
-  }, [inqUntil])
 
   useEffect(() => {
     if (!timerRunning) return
@@ -221,7 +267,6 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [game?.phase, Boolean(game)])
 
-  const inqLeftSec = Math.max(0, Math.ceil((inqUntil - clock) / 1000))
   const preview = useMemo(() => roleNamesList(playerCount), [playerCount])
 
   function syncPlayer(g: GameState, id: string) {
@@ -231,6 +276,16 @@ export default function App() {
   function setCount(n: number) {
     setPlayerCount(n)
     setNames((prev) => Array.from({ length: n }, (_, i) => prev[i] ?? ''))
+  }
+
+  function moveName(index: number, dir: -1 | 1) {
+    setNames((prev) => {
+      const j = index + dir
+      if (j < 0 || j >= prev.length) return prev
+      const next = [...prev]
+      ;[next[index], next[j]] = [next[j]!, next[index]!]
+      return next
+    })
   }
 
   function startGame() {
@@ -243,6 +298,7 @@ export default function App() {
       alert('نام‌ها نباید تکراری باشند.')
       return
     }
+    clearActiveSession()
     savePlayers(cleaned.length, cleaned)
     const next = createGame(cleaned)
     setGame(next)
@@ -250,17 +306,39 @@ export default function App() {
     setVoteSlot(null)
     setPendingVote(null)
     setInqUntil(0)
+    setSpinLeaderId(null)
+    setSpinInquirerId(null)
     setScreen('deal')
+  }
+
+  function beginLeaderSpin(g: GameState) {
+    if (completedMissions(g) >= 1) return
+    const leaderId =
+      g.players[Math.floor(Math.random() * g.players.length)]!.id
+    const inquirerId = settings.inquiryEnabled
+      ? pickFirstInquirerId(g.players, leaderId, settings.firstInquirerMode)
+      : null
+    setSpinLeaderId(leaderId)
+    setSpinInquirerId(inquirerId)
+    setScreen('leader-spin')
+  }
+
+  function finishLeaderSpin() {
+    if (game && spinLeaderId) {
+      setGame(assignLeader(game, spinLeaderId, spinInquirerId))
+    }
+    setScreen('lobby')
   }
 
   function resumeActiveGame() {
     const session = loadActiveSession()
     if (!session) return
-    const nextScreen = SCREENS.has(session.screen as Screen)
+    let nextScreen = SCREENS.has(session.screen as Screen)
       ? (session.screen as Screen)
       : session.game.phase === 'deal'
         ? 'deal'
         : 'lobby'
+    if (nextScreen === 'leader-spin') nextScreen = 'lobby'
     setGame(session.game)
     setInqUntil(session.inqUntil)
     setSelected(null)
@@ -271,6 +349,8 @@ export default function App() {
         ? shuffle([...session.game.vote.slots])
         : [],
     )
+    setSpinLeaderId(session.game.leaderId ?? null)
+    setSpinInquirerId(session.game.firstInquirerId ?? null)
     setScreen(nextScreen)
   }
 
@@ -298,6 +378,8 @@ export default function App() {
     setVoteSlot(null)
     setPendingVote(null)
     setInqUntil(0)
+    setSpinLeaderId(null)
+    setSpinInquirerId(null)
     setScreen('home')
   }
 
@@ -348,14 +430,24 @@ export default function App() {
   }
 
   function beginInquiry() {
-    if (inqLeftSec > 0) return
+    if (!settings.inquiryEnabled || !game) return
+    if (!canPerformInquiry(game)) return
     setSelected(null)
     setScreen('inq-pick')
   }
 
   function closeInquiry() {
-    setInqUntil(Date.now() + 120 * 1000)
-    setClock(Date.now())
+    if (!game || !selected) {
+      setSelected(null)
+      setScreen('lobby')
+      return
+    }
+    const next = completeInquiry(game, selected.id)
+    if ('error' in next) {
+      alert(next.error)
+      return
+    }
+    setGame(next)
     setSelected(null)
     setScreen('lobby')
   }
@@ -370,8 +462,12 @@ export default function App() {
     setScreen('vote-setup')
   }
 
-  function confirmVoteSize(size: number) {
+  function confirmStartMission() {
     if (!game) return
+    const size =
+      (game.missionSizes?.length === 5
+        ? game.missionSizes
+        : TEAM_SIZES[game.playerCount] ?? [])[game.currentMission] ?? 3
     const result = startVote(game, size)
     if ('error' in result) {
       alert(result.error)
@@ -431,11 +527,53 @@ export default function App() {
       return
     }
     setGame(result)
+    const kind = climaxKind(result)
+    if (kind === 'evil') {
+      setGame(declareEvilWin(result))
+      setScreen('climax-evil')
+      return
+    }
+    if (kind === 'assassin') {
+      setSelected(null)
+      setScreen('assassin-intro')
+      return
+    }
     setScreen('lobby')
+  }
+
+  function openAssassinShot() {
+    if (!game || climaxKind(game) !== 'assassin') return
+    if (game.winner) {
+      setScreen('reveal')
+      return
+    }
+    setSelected(null)
+    setScreen('assassin-intro')
+  }
+
+  function confirmAssassinShot() {
+    if (!game || !selected) return
+    const result = resolveAssassinShot(game, selected.id)
+    if ('error' in result) {
+      alert(result.error)
+      return
+    }
+    setGame(result)
+    setScreen('assassin-result')
   }
 
   function confirmEndGame() {
     if (!game) return
+    const kind = climaxKind(game)
+    if (kind === 'evil' && !game.winner) {
+      setGame(declareEvilWin(game))
+      setScreen('climax-evil')
+      return
+    }
+    if (kind === 'assassin' && !game.winner) {
+      openAssassinShot()
+      return
+    }
     setGame(endGameReveal(game))
     setScreen('reveal')
   }
@@ -512,6 +650,63 @@ export default function App() {
       : null
   const timerMm = Math.floor(timerLeft / 60)
   const timerSs = timerLeft % 60
+  const leaderPlayer =
+    game?.leaderId != null
+      ? game.players.find((p) => p.id === game.leaderId) ?? null
+      : null
+  const inquiryHolderPlayer = game ? inquiryHolder(game) : null
+  const inquiryReady = game ? canPerformInquiry(game) : false
+  const missionsDone = game ? completedMissions(game) : 0
+  const inquiryTargetList = game ? inquiryTargets(game) : []
+  const hasInquiryHolder = Boolean(game && inquiryHolder(game))
+  const inquiryBlocked = !game
+    ? null
+    : !hasInquiryHolder
+      ? 'اول انتخاب لیدر را بزنید'
+      : inquiryTargetList.length === 0
+        ? 'کسی برای استعلام نمانده'
+        : !inquiryReady
+          ? missionsDone < 2
+            ? 'اولین استعلام بعد از مأموریت ۲'
+            : `بعد از مأموریت ${toFa(missionsDone + 1)}`
+          : null
+  const decided = game ? climaxKind(game) : null
+  const rejectionCount = game?.teamRejections ?? 0
+  const rejectionCap = rejectionCount >= 5
+  const missionFailWin = Boolean(summary && summary.fail >= 3)
+  const gameLocked = Boolean(
+    game?.winner || decided === 'assassin' || missionFailWin || rejectionCap,
+  )
+
+  function bumpRejection() {
+    if (!game || game.winner || missionFailWin || decided === 'assassin') return
+    if ((game.teamRejections ?? 0) >= 5) return
+    if (game.vote && !game.vote.revealed) {
+      alert('اول مأموریت فعلی را تمام کنید.')
+      return
+    }
+    const next = rejectTeamProposal(game)
+    if ('error' in next) {
+      alert(next.error)
+      return
+    }
+    setGame(next)
+  }
+
+  function undoRejection() {
+    if (!game || game.winner || missionFailWin || decided === 'assassin') return
+    const next = undoTeamRejection(game)
+    if ('error' in next) {
+      alert(next.error)
+      return
+    }
+    setGame(next)
+  }
+
+  const assassinTarget =
+    game?.assassinTargetId != null
+      ? game.players.find((p) => p.id === game.assassinTargetId) ?? null
+      : null
 
   return (
     <div className="app">
@@ -528,7 +723,7 @@ export default function App() {
             <p className="brand__mark">بدون میزبان</p>
             <h1 className="brand__title">آوالون</h1>
             <p className="brand__tagline">
-              نقش بگیر، توانایی ببین، رأی مخفی بده — گوشی دست‌به‌دست.
+              نقش محرمانه، مأموریت مخفی، استعلام ساید — بدون میزبان.
             </p>
           </header>
           <div className="home-dock">
@@ -544,8 +739,11 @@ export default function App() {
               >
                 شروع بازی جدید
               </button>
-              <button className="btn btn--ghost" onClick={() => setShowGuide(true)}>
-                راهنمای نقش‌ها
+              <button className="btn btn--ghost" onClick={() => {
+                setGuideTab('rules')
+                setShowGuide(true)
+              }}>
+                راهنمای بازی
               </button>
               <button className="btn btn--ghost" onClick={openSettings}>
                 تنظیمات
@@ -589,10 +787,15 @@ export default function App() {
               شهر {toFa(preview.good.length)} · مافیا {toFa(preview.evil.length)}
             </p>
             <p className="hint muted">
-              پیشنهاد اندازه تیم:{' '}
+              اندازه تیم:{' '}
               {(TEAM_SIZES[playerCount] ?? []).map(toFa).join(' · ')}
-              {needsTwoFails(playerCount, 3) ? ' · مأموریت ۴: دو شکست' : ''}
+              {needsTwoFails(playerCount, 3) ? ' · مأموریت ۴: ۲ جمجمه' : ''}
             </p>
+            {needsTwoFails(playerCount, 3) && (
+              <p className="hint muted">
+                از ۷ نفر به بالا، مأموریت چهارم فقط با دو کارت جمجمه می‌سوزد.
+              </p>
+            )}
           </div>
 
           <div className="role-preview">
@@ -621,11 +824,43 @@ export default function App() {
               startGame()
             }}
           >
+            <div className="seat-note">
+              <p className="seat-note__title">ترتیب نشستن دور میز</p>
+              <p>
+                اسم‌ها را به همان ترتیبی بنویسید که دور میز نشسته‌اید؛ از یک نفر شروع
+                کنید و در جهت عقربه‌های ساعت جلو بروید. «سمت راست لیدر» روی همین
+                ترتیب حساب می‌شود. اگر جابه‌جا نوشتید، با دکمه‌های بالا/پایین جایشان را
+                عوض کنید.
+              </p>
+            </div>
+
             {names.map((name, i) => {
               const isLast = i === names.length - 1
               return (
-                <label key={i} className="field">
-                  <span>بازیکن {toFa(i + 1)}</span>
+                <div key={i} className="field field--seat">
+                  <div className="field__head">
+                    <span>صندلی {toFa(i + 1)}</span>
+                    <div className="seat-move">
+                      <button
+                        type="button"
+                        className="seat-move__btn"
+                        disabled={i === 0}
+                        onClick={() => moveName(i, -1)}
+                        aria-label="جابه‌جایی به بالا"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        className="seat-move__btn"
+                        disabled={isLast}
+                        onClick={() => moveName(i, 1)}
+                        aria-label="جابه‌جایی به پایین"
+                      >
+                        ↓
+                      </button>
+                    </div>
+                  </div>
                   <input
                     value={name}
                     onChange={(e) => {
@@ -648,13 +883,13 @@ export default function App() {
                       next?.focus()
                     }}
                     data-name-idx={i}
-                    placeholder="نام را بنویس"
+                    placeholder="نام بازیکن"
                     autoComplete="off"
                     autoCapitalize="words"
                     enterKeyHint={isLast ? 'done' : 'next'}
                     inputMode="text"
                   />
-                </label>
+                </div>
               )
             })}
             <button className="btn btn--primary sticky-cta" type="submit">
@@ -740,63 +975,103 @@ export default function App() {
         </section>
       )}
 
+      {screen === 'leader-spin' && game && spinLeaderId && (
+        <LeaderWheel
+          key={spinLeaderId}
+          players={game.players}
+          inquiryEnabled={settings.inquiryEnabled}
+          leaderId={spinLeaderId}
+          firstInquirerId={spinInquirerId}
+          onCancel={() => setScreen('lobby')}
+          onFinished={finishLeaderSpin}
+        />
+      )}
+
       {screen === 'lobby' && game && (
-        <section className="screen lobby fade-in">
-          <header className="topbar">
-            <button className="link" onClick={openSettings}>تنظیمات</button>
-            <h2>میز بازی</h2>
-            <button className="link" onClick={() => setShowGuide(true)}>راهنما</button>
-          </header>
-
-          <MissionBoard game={game} />
-
-          {summary && (summary.success >= 3 || summary.fail >= 3) && (
-            <p className="hint">
-              {summary.success >= 3
-                ? '۳ مأموریت موفق — وقت حدس مرلین یا پایان بازی است.'
-                : '۳ مأموریت شکست — مافیا جلوست. پایان بازی را بزنید.'}
-            </p>
-          )}
-
-          <p className="lead">عملیات مورد نظر را انتخاب کنید.</p>
-
-          <div className="dash-grid">
-            <button className="dash-card" onClick={openAbilities}>
-              <span className="dash-card__icon" aria-hidden>◈</span>
-              <span className="dash-card__label">نقش‌ها و توانایی‌ها</span>
-              <span className="dash-card__desc">نقش و یارهایت را دوباره ببین</span>
-            </button>
-            <button
-              className="dash-card"
-              onClick={beginInquiry}
-              disabled={inqLeftSec > 0}
-            >
-              <span className="dash-card__icon" aria-hidden>◎</span>
-              <span className="dash-card__label">
-                {inqLeftSec > 0 ? `استعلام (${toFa(inqLeftSec)}ث)` : 'استعلام'}
-              </span>
-              <span className="dash-card__desc">فقط شهر یا مافیا بودن یک نفر</span>
-            </button>
-            <button className="dash-card" onClick={beginVote}>
-              <span className="dash-card__icon" aria-hidden>✦</span>
-              <span className="dash-card__label">
-                {game.vote && !game.vote.revealed ? 'ادامه رأی‌گیری' : 'رأی‌گیری'}
-              </span>
-              <span className="dash-card__desc">رأی مخفی خورشید / جمجمه</span>
-            </button>
-            <button className="dash-card" onClick={openTimer}>
-              <span className="dash-card__icon" aria-hidden>◷</span>
-              <span className="dash-card__label">تایمر صحبت</span>
-              <span className="dash-card__desc">
-                صحبت {toFa(settings.talkSec)}ث · چالش {toFa(settings.challengeSec)}ث
-              </span>
-            </button>
-          </div>
-
-          <button className="btn btn--ghost" onClick={() => setScreen('end-confirm')}>
-            پایان بازی و افشای نقش‌ها
-          </button>
-        </section>
+        <MapStage
+          mode="lobby"
+          game={game}
+          mapBg={settings.mapBg}
+          inquiryEnabled={settings.inquiryEnabled}
+          inquiryReady={inquiryReady}
+          inquiryHint={
+            inquiryReady
+              ? inquiryHolderPlayer
+                ? `نوبت ${inquiryHolderPlayer.name}`
+                : 'ساید یک نفر'
+              : inquiryBlocked ?? ''
+          }
+          missionLabel={
+            game.vote && !game.vote.revealed ? 'ادامه مأموریت' : 'مأموریت'
+          }
+          missionDisabled={gameLocked && !(game.vote && !game.vote.revealed)}
+          inquiryDisabled={!inquiryReady || gameLocked}
+          leaderName={leaderPlayer?.name ?? null}
+          inquiryName={
+            settings.inquiryEnabled ? inquiryHolderPlayer?.name ?? null : null
+          }
+          leaderLabel={
+            missionsDone >= 1
+              ? 'لیدر ثابت شد'
+              : game.leaderChosen
+                ? 'چرخش دوبارهٔ لیدر'
+                : 'انتخاب لیدر'
+          }
+          leaderDisabled={gameLocked || missionsDone >= 1}
+          leaderHint={
+            missionsDone >= 1
+              ? 'بعد از مأموریت ۱ دیگر عوض نمی‌شود'
+              : 'چرخش میز'
+          }
+          timerHint={`${toFa(settings.talkSec)}ث · چالش ${toFa(settings.challengeSec)}ث`}
+          rejectionCount={rejectionCount}
+          rejectionBumpDisabled={
+            Boolean(game.winner) ||
+            missionFailWin ||
+            decided === 'assassin' ||
+            rejectionCap ||
+            Boolean(game.vote && !game.vote.revealed)
+          }
+          rejectionUndoDisabled={
+            rejectionCount <= 0 ||
+            Boolean(game.winner) ||
+            missionFailWin ||
+            decided === 'assassin'
+          }
+          climax={
+            decided === 'assassin' && !game.winner
+              ? 'assassin'
+              : decided === 'evil' && !game.winner
+                ? rejectionCap
+                  ? 'reject'
+                  : 'evil'
+                : null
+          }
+          onSettings={openSettings}
+          onGuide={() => {
+            setGuideTab('rules')
+            setShowGuide(true)
+          }}
+          onCycleMap={() => {
+            const next = ((settings.mapBg + 1) % MAP_BACKGROUNDS.length) as MapBgIndex
+            const saved = saveSettings({ ...settings, mapBg: next })
+            setSettings(saved)
+            setSettingsDraft(saved)
+          }}
+          onMission={beginVote}
+          onInquiry={beginInquiry}
+          onLeader={() => beginLeaderSpin(game)}
+          onAbilities={openAbilities}
+          onTimer={openTimer}
+          onEnd={() => setScreen('end-confirm')}
+          onBumpRejection={bumpRejection}
+          onUndoRejection={undoRejection}
+          onAssassin={openAssassinShot}
+          onDeclareEvil={() => {
+            setGame(declareEvilWin(game))
+            setScreen('climax-evil')
+          }}
+        />
       )}
 
       {screen === 'abilities' && game && (
@@ -892,31 +1167,46 @@ export default function App() {
             <span />
           </header>
           <p className="lead">
-            نام بازیکن را بزن. فقط شهر/مافیا مشخص می‌شود.
+            {inquiryHolderPlayer
+              ? `${inquiryHolderPlayer.name} یک نفر را انتخاب می‌کند. فقط شهر/مافیا مشخص می‌شود؛ بعد استعلام به همان نفر می‌رسد.`
+              : 'یک نفر را انتخاب کن. فقط شهر/مافیا مشخص می‌شود.'}
           </p>
-          <ul className="player-grid">
-            {game.players.map((p) => (
-              <li key={p.id}>
-                <button
-                  className="player-chip"
-                  onClick={() => {
-                    setSelected(p)
-                    setScreen('inq-confirm')
-                  }}
-                >
-                  <span className="player-chip__name">{p.name}</span>
-                  <span className="player-chip__meta">استعلام ساید</span>
-                </button>
-              </li>
-            ))}
-          </ul>
+          {inquiryTargetList.length === 0 ? (
+            <p className="hint">
+              {!hasInquiryHolder
+                ? 'دارندهٔ استعلام مشخص نیست. از لابی «انتخاب لیدر» را بزنید تا اولین استعلام‌کننده معلوم شود.'
+                : 'کسی برای استعلام باقی نمانده — همهٔ واجدین قبلاً استعلام گرفته‌اند.'}
+            </p>
+          ) : (
+            <ul className="player-grid">
+              {inquiryTargetList.map((p) => (
+                <li key={p.id}>
+                  <button
+                    className="player-chip"
+                    onClick={() => {
+                      setSelected(p)
+                      setScreen('inq-confirm')
+                    }}
+                  >
+                    <span className="player-chip__name">{p.name}</span>
+                    <span className="player-chip__meta">استعلام ساید</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {(game.inquiryHistoryIds?.length ?? 0) > 0 && (
+            <p className="hint muted">
+              کسانی که قبلاً استعلام گرفته‌اند دیگر قابل استعلام نیستند.
+            </p>
+          )}
         </section>
       )}
 
       {screen === 'inq-confirm' && selected && (
         <ConfirmScreen
           title="تأیید استعلام"
-          body={`ساید «${selected.name}» را می‌بینی. مطمئنی؟`}
+          body={`ساید «${selected.name}» را می‌بینی؛ بعد استعلام به ${selected.name} می‌رسد. مطمئنی؟`}
           confirmLabel="تأیید"
           cancelLabel="انصراف"
           onBack={() => setScreen('inq-pick')}
@@ -958,6 +1248,9 @@ export default function App() {
             </h3>
             <p className="side-reveal__hint">نقش دقیق نشان داده نمی‌شود.</p>
           </div>
+          <p className="hint">
+            استعلام بعدی دست <strong>{selected.name}</strong> است.
+          </p>
           <button className="btn btn--ghost" onClick={closeInquiry}>
             متوجه شدم
           </button>
@@ -965,46 +1258,38 @@ export default function App() {
       )}
 
       {screen === 'vote-setup' && game && (
-        <section className="screen fade-in">
-          <header className="topbar">
-            <button className="link" onClick={() => setScreen('lobby')}>لابی</button>
-            <h2>رأی‌گیری</h2>
-            <span />
-          </header>
-          <p className="lead">
-            چند نفر در این رأی‌گیری شرکت می‌کنند؟ (پیشنهاد رول‌بوک برای این دور:{' '}
-            {toFa(suggested ?? 3)} نفر)
-          </p>
-          <div className="count-choice">
-            {[2, 3, 4, 5].map((n) => (
-              <button
-                key={n}
-                className={`count-choice__btn ${n === suggested ? 'is-suggested' : ''}`}
-                onClick={() => confirmVoteSize(n)}
-              >
-                {toFa(n)}
-              </button>
-            ))}
-          </div>
-        </section>
+        <ConfirmScreen
+          title={`مأموریت ${toFa((game.currentMission ?? 0) + 1)}`}
+          body={
+            needsTwoFails(game.playerCount, game.currentMission)
+              ? `طبق رول‌بوک ${toFa(suggested ?? 3)} نفر به مأموریت می‌روند. برای سوختن این مأموریت ۲ جمجمه لازم است. آماده‌اید؟`
+              : `طبق رول‌بوک ${toFa(suggested ?? 3)} نفر به مأموریت می‌روند. با ۱ جمجمه مأموریت می‌سوزد. آماده‌اید؟`
+          }
+          confirmLabel="شروع مأموریت"
+          cancelLabel="بازگشت به لابی"
+          onBack={() => setScreen('lobby')}
+          onConfirm={confirmStartMission}
+        />
       )}
 
       {screen === 'vote' && game?.vote && (
         <section className="screen vote fade-in">
           <header className="topbar">
             <button className="link" onClick={() => setScreen('lobby')}>لابی</button>
-            <h2>رأی · {toFa(game.vote.teamSize)} نفر</h2>
+            <h2>
+              مأموریت {toFa(game.vote.missionIndex + 1)} · {toFa(game.vote.teamSize)} نفر
+            </h2>
             <span />
           </header>
           <p className="lead">
-            هر عضو تیم یک عدد آزاد برمی‌دارد و رأی مخفی می‌دهد.
+            هر عضو تیم یک عدد آزاد برمی‌دارد و کارت مخفی می‌دهد.
             {needsTwoFails(game.playerCount, game.vote.missionIndex)
               ? ' برای شکست این مأموریت ۲ جمجمه لازم است.'
               : ' با ۱ جمجمه مأموریت می‌سوزد.'}
           </p>
           <p className="progress-line">
             {toFa(game.vote.slots.filter((s) => s.vote).length)} از{' '}
-            {toFa(game.vote.teamSize)} رأی
+            {toFa(game.vote.teamSize)} کارت
           </p>
           <div className="keypad">
             {votePad.map((slot) => {
@@ -1018,14 +1303,14 @@ export default function App() {
                   onClick={() => onVoteNumber(slot.number)}
                 >
                   <span className="keypad__num">{toFa(slot.number)}</span>
-                  <span className="keypad__hint">{taken ? 'رأی داد' : 'آزاد'}</span>
+                  <span className="keypad__hint">{taken ? 'داد' : 'آزاد'}</span>
                 </button>
               )
             })}
           </div>
           {allVotesIn(game) && (
             <button className="btn btn--primary sticky-cta" onClick={showVoteResult}>
-              نمایش نتیجه رأی‌گیری
+              نمایش نتیجه مأموریت
             </button>
           )}
         </section>
@@ -1038,7 +1323,7 @@ export default function App() {
             <h2>عدد {toFa(voteSlot)}</h2>
             <span />
           </header>
-          <p className="lead">رأی را انتخاب کن؛ بعد باید تأیید کنی. جای دکمه‌ها هر بار عوض می‌شود.</p>
+          <p className="lead">کارت را انتخاب کن؛ بعد باید تأیید کنی. جای دکمه‌ها هر بار عوض می‌شود.</p>
           <div className="vote-choices">
             {voteOrder.map((choice) =>
               choice === 'pass' ? (
@@ -1079,7 +1364,7 @@ export default function App() {
             >
               بازگشت
             </button>
-            <h2>تأیید رأی</h2>
+            <h2>تأیید کارت</h2>
             <span />
           </header>
           <div
@@ -1090,7 +1375,7 @@ export default function App() {
             <p>برای عدد {toFa(voteSlot)} — مطمئنی؟</p>
           </div>
           <button className="btn btn--primary" onClick={submitVote}>
-            تأیید رأی
+            تأیید کارت
           </button>
           <button
             className="btn btn--ghost"
@@ -1127,7 +1412,7 @@ export default function App() {
             </div>
           </div>
           <p className="hint muted">
-            برای شکست {toFa(voteTally.failsNeeded)} جمجمه لازم بود. کی رأی داد مشخص نیست.
+            برای شکست {toFa(voteTally.failsNeeded)} جمجمه لازم بود. کسی که چه کارتی داد مشخص نیست.
           </p>
           <button className="btn btn--primary" onClick={continueAfterVote}>
             بازگشت به لابی
@@ -1135,11 +1420,145 @@ export default function App() {
         </section>
       )}
 
+      {screen === 'climax-evil' && game && (
+        <section className="screen climax climax--evil fade-in">
+          <p className="climax__kicker">
+            {(game.teamRejections ?? 0) >= 5
+              ? 'پنج تیم بی‌رأی'
+              : 'سه جمجمه روی میز'}
+          </p>
+          <h1 className="climax__title">مافیا پیروز شد</h1>
+          <p className="climax__body">
+            {(game.teamRejections ?? 0) >= 5
+              ? 'پنج بار پیشنهاد تیم رأی نیاورد. شهر فرصت مأموریت را از دست داد.'
+              : 'سه مأموریت شکست خورد. شهر دیگر فرصتی ندارد — تاریکی بر میز حکم می‌راند.'}
+          </p>
+          <MissionBoard game={game} />
+          <button
+            className="btn btn--primary"
+            onClick={() => setScreen('reveal')}
+          >
+            افشای نقش‌ها
+          </button>
+        </section>
+      )}
+
+      {screen === 'assassin-intro' && game && (
+        <section className="screen climax climax--shot fade-in">
+          <p className="climax__kicker">سه خورشید روشن شد</p>
+          <h1 className="climax__title">شلیک اساسین</h1>
+          <p className="climax__body">
+            شهر مأموریت‌ها را برد؛ ولی هنوز تمام نشده. اساسین یک تیر دارد — اگر
+            مرلین را بزند، پیروزی از آنِ مافیاست. اگر خطا کند، شهر قهرمان می‌ماند.
+          </p>
+          <p className="hint muted">میز با هم حرف بزنید؛ بعد اسم هدف را انتخاب کنید.</p>
+          <button
+            className="btn btn--primary"
+            onClick={() => {
+              setSelected(null)
+              setScreen('assassin-pick')
+            }}
+          >
+            انتخاب هدف
+          </button>
+          <button className="btn btn--ghost" onClick={() => setScreen('lobby')}>
+            بعداً
+          </button>
+        </section>
+      )}
+
+      {screen === 'assassin-pick' && game && (
+        <section className="screen fade-in">
+          <header className="topbar">
+            <button className="link" onClick={() => setScreen('assassin-intro')}>
+              بازگشت
+            </button>
+            <h2>هدف شلیک</h2>
+            <span />
+          </header>
+          <p className="lead">چه کسی مرلین است؟ یک نفر را نشانه بگیرید.</p>
+          <ul className="player-grid">
+            {game.players.map((p) => (
+              <li key={p.id}>
+                <button
+                  className="player-chip"
+                  onClick={() => {
+                    setSelected(p)
+                    setScreen('assassin-confirm')
+                  }}
+                >
+                  <span className="player-chip__name">{p.name}</span>
+                  <span className="player-chip__meta">شلیک</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {screen === 'assassin-confirm' && selected && (
+        <ConfirmScreen
+          title="تأیید شلیک"
+          body={`اساسین به «${selected.name}» شلیک می‌کند. این تیر برنمی‌گردد. مطمئنید؟`}
+          confirmLabel="شلیک کن"
+          cancelLabel="انصراف"
+          onBack={() => setScreen('assassin-pick')}
+          onConfirm={confirmAssassinShot}
+        />
+      )}
+
+      {screen === 'assassin-result' && game && (
+        <section
+          className={`screen climax ${game.assassinHit ? 'climax--evil' : 'climax--good'} fade-in`}
+        >
+          <p className="climax__kicker">
+            {game.assassinHit ? 'تیر به هدف خورد' : 'تیر خطا رفت'}
+          </p>
+          <h1 className="climax__title">
+            {game.assassinHit ? 'مافیا دزدیدش' : 'شهر ایستاد'}
+          </h1>
+          <p className="climax__body">
+            {assassinTarget ? (
+              game.assassinHit ? (
+                <>
+                  <strong>{assassinTarget.name}</strong> مرلین بود. اساسین درست زد —
+                  پیروزی از آنِ مافیاست.
+                </>
+              ) : (
+                <>
+                  <strong>{assassinTarget.name}</strong> مرلین نبود. شهر سه مأموریت
+                  را حفظ کرد و برنده ماند.
+                </>
+              )
+            ) : game.assassinHit ? (
+              'اساسین مرلین را زد. مافیا برنده است.'
+            ) : (
+              'اساسین خطا کرد. شهر برنده است.'
+            )}
+          </p>
+          <button className="btn btn--primary" onClick={() => setScreen('reveal')}>
+            افشای نقش‌ها
+          </button>
+        </section>
+      )}
+
       {screen === 'end-confirm' && (
         <ConfirmScreen
           title="پایان بازی؟"
-          body="اگر ادامه دهید، همه نقش‌ها افشا می‌شوند و استعلام و رأی‌گیری تمام می‌شود. مطمئنید؟"
-          confirmLabel="بله، نقش‌ها را نشان بده"
+          body={
+            decided === 'assassin'
+              ? 'هنوز شلیک اساسین مانده. اگر ادامه دهید بدون شلیک، نقش‌ها افشا می‌شوند. مطمئنید؟'
+              : decided === 'evil'
+                ? 'سه مأموریت شکست خورده — مافیا برنده است. نقش‌ها را نشان می‌دهید؟'
+                : 'اگر ادامه دهید، همه نقش‌ها افشا می‌شوند. مطمئنید؟'
+          }
+          confirmLabel={
+            decided === 'assassin' && !game?.winner
+              ? 'برو به شلیک اساسین'
+              : decided === 'evil' && !game?.winner
+                ? 'اعلام پیروزی مافیا'
+                : 'بله، نقش‌ها را نشان بده'
+          }
           cancelLabel="انصراف"
           onBack={() => setScreen('lobby')}
           onConfirm={confirmEndGame}
@@ -1182,14 +1601,22 @@ export default function App() {
           <header className="brand">
             <p className="brand__mark">بازی تمام شد</p>
             <h1 className="brand__title" style={{ fontSize: '2.4rem' }}>
-              {summary.success >= 3
-                ? 'شهر جلو بود'
-                : summary.fail >= 3
-                  ? 'مافیا جلو بود'
-                  : 'میز بسته شد'}
+              {game.winner === 'good'
+                ? 'پیروزی شهر'
+                : game.winner === 'evil'
+                  ? 'پیروزی مافیا'
+                  : summary.success >= 3
+                    ? 'شهر جلو بود'
+                    : summary.fail >= 3
+                      ? 'مافیا جلو بود'
+                      : 'میز بسته شد'}
             </h1>
             <p className="brand__tagline">
-              مأموریت موفق: {toFa(summary.success)} · شکست: {toFa(summary.fail)}
+              {game.assassinHit === true
+                ? 'اساسین مرلین را زد'
+                : game.assassinHit === false
+                  ? 'شلیک اساسین خطا رفت'
+                  : `مأموریت موفق: ${toFa(summary.success)} · شکست: ${toFa(summary.fail)}`}
             </p>
           </header>
           <MissionBoard game={game} />
@@ -1286,7 +1713,7 @@ export default function App() {
       )}
 
       {screen === 'settings' && (
-        <section className="screen fade-in">
+        <section className="screen settings fade-in">
           <header className="topbar">
             <button
               className="link"
@@ -1300,85 +1727,196 @@ export default function App() {
             <span />
           </header>
 
-          <p className="lead">زمان صحبت و چالش برای تایمر نوبت‌ها.</p>
-
-          <div className="settings-block">
-            <p className="label">زمان صحبت (ثانیه)</p>
-            <div className="count-row">
-              <button
-                className="btn btn--icon"
-                disabled={settingsDraft.talkSec <= MIN_SEC}
-                onClick={() =>
-                  setSettingsDraft((s) => ({
-                    ...s,
-                    talkSec: Math.max(MIN_SEC, s.talkSec - 5),
-                  }))
-                }
-                aria-label="کم کردن صحبت"
-              >
-                −
-              </button>
-              <span className="count-num">{toFa(settingsDraft.talkSec)}</span>
-              <button
-                className="btn btn--icon"
-                disabled={settingsDraft.talkSec >= MAX_SEC}
-                onClick={() =>
-                  setSettingsDraft((s) => ({
-                    ...s,
-                    talkSec: Math.min(MAX_SEC, s.talkSec + 5),
-                  }))
-                }
-                aria-label="زیاد کردن صحبت"
-              >
-                +
-              </button>
+          <div className="settings-section">
+            <div className="settings-section__head">
+              <h3>استعلام ساید</h3>
+              <p>
+                اولین استعلام بعد از مأموریت ۲؛ بعد به نفری که استعلام شده می‌رسد.
+                کسانی که قبلاً استعلام گرفته‌اند دیگر هدف نمی‌شوند.
+              </p>
             </div>
-            <p className="hint muted">پیشنهاد چالش: نصف صحبت</p>
+
+            <label className="settings-toggle">
+              <div className="settings-toggle__text">
+                <strong>فعال بودن استعلام</strong>
+                <span>پیش‌فرض: روشن</span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settingsDraft.inquiryEnabled}
+                className={`switch ${settingsDraft.inquiryEnabled ? 'is-on' : ''}`}
+                onClick={() =>
+                  setSettingsDraft((s) => ({
+                    ...s,
+                    inquiryEnabled: !s.inquiryEnabled,
+                  }))
+                }
+              >
+                <span className="switch__knob" />
+              </button>
+            </label>
+
+            <div
+              className={`settings-options ${
+                settingsDraft.inquiryEnabled ? '' : 'is-disabled'
+              }`}
+            >
+              <p className="label">اولین استعلام‌کننده</p>
+              <div className="option-cards">
+                {(
+                  [
+                    {
+                      id: 'rightOfLeader' as FirstInquirerMode,
+                      title: 'سمت راست لیدر',
+                      desc: 'نفر سمت راست لیدر اول، استعلام را شروع می‌کند.',
+                    },
+                    {
+                      id: 'random' as FirstInquirerMode,
+                      title: 'تصادفی',
+                      desc: 'یکی از بازیکن‌ها به‌صورت رندوم انتخاب می‌شود.',
+                    },
+                  ] as const
+                ).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    className={`option-card ${
+                      settingsDraft.firstInquirerMode === opt.id ? 'is-active' : ''
+                    }`}
+                    disabled={!settingsDraft.inquiryEnabled}
+                    onClick={() =>
+                      setSettingsDraft((s) => ({
+                        ...s,
+                        firstInquirerMode: opt.id,
+                      }))
+                    }
+                  >
+                    <span className="option-card__radio" aria-hidden />
+                    <span className="option-card__body">
+                      <strong>{opt.title}</strong>
+                      <small>{opt.desc}</small>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
 
-          <div className="settings-block">
-            <p className="label">زمان چالش (ثانیه)</p>
-            <div className="count-row">
+          <div className="settings-section">
+            <div className="settings-section__head">
+              <h3>تایمر نوبت</h3>
+              <p>زمان صحبت و چالش برای تایمر بدون میزبان.</p>
+            </div>
+
+            <div className="settings-block">
+              <p className="label">زمان صحبت (ثانیه)</p>
+              <div className="count-row">
+                <button
+                  className="btn btn--icon"
+                  disabled={settingsDraft.talkSec <= MIN_SEC}
+                  onClick={() =>
+                    setSettingsDraft((s) => ({
+                      ...s,
+                      talkSec: Math.max(MIN_SEC, s.talkSec - 5),
+                    }))
+                  }
+                  aria-label="کم کردن صحبت"
+                >
+                  −
+                </button>
+                <span className="count-num">{toFa(settingsDraft.talkSec)}</span>
+                <button
+                  className="btn btn--icon"
+                  disabled={settingsDraft.talkSec >= MAX_SEC}
+                  onClick={() =>
+                    setSettingsDraft((s) => ({
+                      ...s,
+                      talkSec: Math.min(MAX_SEC, s.talkSec + 5),
+                    }))
+                  }
+                  aria-label="زیاد کردن صحبت"
+                >
+                  +
+                </button>
+              </div>
+              <p className="hint muted">پیشنهاد چالش: نصف صحبت</p>
+            </div>
+
+            <div className="settings-block">
+              <p className="label">زمان چالش (ثانیه)</p>
+              <div className="count-row">
+                <button
+                  className="btn btn--icon"
+                  disabled={settingsDraft.challengeSec <= MIN_SEC}
+                  onClick={() =>
+                    setSettingsDraft((s) => ({
+                      ...s,
+                      challengeSec: Math.max(MIN_SEC, s.challengeSec - 5),
+                    }))
+                  }
+                  aria-label="کم کردن چالش"
+                >
+                  −
+                </button>
+                <span className="count-num">{toFa(settingsDraft.challengeSec)}</span>
+                <button
+                  className="btn btn--icon"
+                  disabled={settingsDraft.challengeSec >= MAX_SEC}
+                  onClick={() =>
+                    setSettingsDraft((s) => ({
+                      ...s,
+                      challengeSec: Math.min(MAX_SEC, s.challengeSec + 5),
+                    }))
+                  }
+                  aria-label="زیاد کردن چالش"
+                >
+                  +
+                </button>
+              </div>
               <button
-                className="btn btn--icon"
-                disabled={settingsDraft.challengeSec <= MIN_SEC}
+                className="link settings-half"
+                type="button"
                 onClick={() =>
                   setSettingsDraft((s) => ({
                     ...s,
-                    challengeSec: Math.max(MIN_SEC, s.challengeSec - 5),
+                    challengeSec: Math.max(MIN_SEC, Math.round(s.talkSec / 2)),
                   }))
                 }
-                aria-label="کم کردن چالش"
               >
-                −
-              </button>
-              <span className="count-num">{toFa(settingsDraft.challengeSec)}</span>
-              <button
-                className="btn btn--icon"
-                disabled={settingsDraft.challengeSec >= MAX_SEC}
-                onClick={() =>
-                  setSettingsDraft((s) => ({
-                    ...s,
-                    challengeSec: Math.min(MAX_SEC, s.challengeSec + 5),
-                  }))
-                }
-                aria-label="زیاد کردن چالش"
-              >
-                +
+                بگذار نصف صحبت (
+                {toFa(Math.max(MIN_SEC, Math.round(settingsDraft.talkSec / 2)))}ث)
               </button>
             </div>
-            <button
-              className="link settings-half"
-              type="button"
-              onClick={() =>
-                setSettingsDraft((s) => ({
-                  ...s,
-                  challengeSec: Math.max(MIN_SEC, Math.round(s.talkSec / 2)),
-                }))
-              }
-            >
-              بگذار نصف صحبت ({toFa(Math.max(MIN_SEC, Math.round(settingsDraft.talkSec / 2)))}ث)
-            </button>
+          </div>
+
+          <div className="settings-section">
+            <div className="settings-section__head">
+              <h3>نقشهٔ مأموریت</h3>
+              <p>چند بک‌گراند جهان برای صفحهٔ نقشه — عکس فعلی شما نگه داشته می‌شود.</p>
+            </div>
+            <div className="map-theme-picker" role="listbox" aria-label="بک‌گراند نقشه">
+              {MAP_BACKGROUNDS.map((src, i) => (
+                <button
+                  key={src}
+                  type="button"
+                  role="option"
+                  aria-selected={settingsDraft.mapBg === i}
+                  className={`map-theme-picker__swatch ${
+                    settingsDraft.mapBg === i ? 'is-active' : ''
+                  }`}
+                  onClick={() =>
+                    setSettingsDraft((s) => ({
+                      ...s,
+                      mapBg: i as MapBgIndex,
+                    }))
+                  }
+                >
+                  <img src={src} alt="" draggable={false} />
+                  <span>{toFa(i + 1)}</span>
+                </button>
+              ))}
+            </div>
           </div>
 
           <button className="btn btn--primary sticky-cta" onClick={saveSettingsAndBack}>
@@ -1391,40 +1929,404 @@ export default function App() {
         <div className="modal" role="dialog" aria-modal="true">
           <div className="modal__panel">
             <header className="modal__head">
-              <h2>دفتر نقش‌ها</h2>
+              <h2>راهنمای بازی</h2>
               <button className="link" onClick={() => setShowGuide(false)}>بستن</button>
             </header>
+            <div className="guide-tabs" role="tablist">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={guideTab === 'rules'}
+                className={`guide-tabs__btn ${guideTab === 'rules' ? 'is-active' : ''}`}
+                onClick={() => setGuideTab('rules')}
+              >
+                رول‌بوک
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={guideTab === 'roles'}
+                className={`guide-tabs__btn ${guideTab === 'roles' ? 'is-active' : ''}`}
+                onClick={() => setGuideTab('roles')}
+              >
+                نقش‌ها
+              </button>
+            </div>
             <div className="modal__body">
-              {(Object.keys(ROLES) as RoleId[]).map((id) => {
-                const r = ROLES[id]
-                const art = ROLE_PORTRAITS[id]
-                return (
-                  <article key={id} className="guide-role">
-                    <div className="guide-role__head">
-                      {art ? (
-                        <img className="guide-role__thumb" src={art} alt="" />
-                      ) : (
-                        <div className="guide-role__thumb guide-role__thumb--empty" />
-                      )}
-                      <div className="guide-role__titles">
-                        <h3>
-                          {r.name}
-                          <span className={r.allegiance === 'good' ? 'is-good' : 'is-evil'}>
-                            {r.nickname}
-                          </span>
-                        </h3>
+              {guideTab === 'rules' ? (
+                <Rulebook />
+              ) : (
+                (Object.keys(ROLES) as RoleId[]).map((id) => {
+                  const r = ROLES[id]
+                  const art = ROLE_PORTRAITS[id]
+                  return (
+                    <article key={id} className="guide-role">
+                      <div className="guide-role__head">
+                        {art ? (
+                          <img className="guide-role__thumb" src={art} alt="" />
+                        ) : (
+                          <div className="guide-role__thumb guide-role__thumb--empty" />
+                        )}
+                        <div className="guide-role__titles">
+                          <h3>
+                            {r.name}
+                            <span className={r.allegiance === 'good' ? 'is-good' : 'is-evil'}>
+                              {r.nickname}
+                            </span>
+                          </h3>
+                        </div>
                       </div>
-                    </div>
-                    <p>{r.lore}</p>
-                    <p className="guide-role__ability">{r.ability}</p>
-                  </article>
-                )
-              })}
+                      <p>{r.lore}</p>
+                      <p className="guide-role__ability">{r.ability}</p>
+                    </article>
+                  )
+                })
+              )}
             </div>
           </div>
         </div>
       )}
+
     </div>
+  )
+}
+
+function Rulebook() {
+  return (
+    <div className="rulebook">
+      <section className="rulebook__block">
+        <h3>هدف</h3>
+        <p>
+          شهر باید سه مأموریت را با موفقیت تمام کند. مافیا با سه شکست مأموریت
+          (یا پنج رد تیم پشت‌سرهم) برنده می‌شود — مگر اینکه بعد از سه پیروزی شهر،
+          اساسین مرلین را درست بزند.
+        </p>
+      </section>
+      <section className="rulebook__block">
+        <h3>نوبت لیدر و تیم</h3>
+        <p>
+          لیدر تعداد لازم برای آن مأموریت را از بازیکنان انتخاب می‌کند. میز با
+          رأی شفاهی تیم را قبول یا رد می‌کند. اگر رد شد، شمارندهٔ «رد تیم» را یکی
+          بالا ببرید و لیدر عوض می‌شود. پنج رد روی یک مأموریت = پیروزی مافیا.
+        </p>
+      </section>
+      <section className="rulebook__block">
+        <h3>کارت مأموریت</h3>
+        <p>
+          اعضای تیم تأییدشده کارت مخفی می‌دهند. شهر همیشه موفقیت می‌دهد؛ مافیا
+          می‌تواند جمجمه بگذارد. معمولاً با یک جمجمه مأموریت می‌سوزد.
+        </p>
+        <p className="rulebook__callout">
+          از ۷ بازیکن به بالا، مأموریت چهارم فقط با <strong>دو جمجمه</strong> شکست
+          می‌خورد — یک جمجمه کافی نیست.
+        </p>
+      </section>
+      <section className="rulebook__block">
+        <h3>استعلام ساید</h3>
+        <p>
+          اگر در تنظیمات روشن باشد: اولین استعلام بعد از مأموریت ۲ آزاد می‌شود.
+          دارندهٔ توکن ساید یک نفر را می‌پرسد و نتیجه فقط به خودش نشان داده می‌شود؛
+          سپس توکن به همان نفر می‌رسد. کسانی که قبلاً استعلام گرفته‌اند دیگر هدف
+          نمی‌شوند.
+        </p>
+      </section>
+      <section className="rulebook__block">
+        <h3>پایان بازی</h3>
+        <ul>
+          <li>سه موفقیت مأموریت ← شلیک اساسین؛ اگر مرلین را بزند مافیا می‌برد، وگرنه شهر.</li>
+          <li>سه شکست مأموریت ← پیروزی مافیا (بدون شلیک).</li>
+          <li>پنج رد تیم ← پیروزی مافیا.</li>
+        </ul>
+      </section>
+      <section className="rulebook__block">
+        <h3>اندازه تیم‌ها</h3>
+        <p className="rulebook__sizes">
+          {[5, 6, 7, 8, 9, 10].map((n) => (
+            <span key={n}>
+              {toFa(n)}نفر: {(TEAM_SIZES[n] ?? []).map(toFa).join('·')}
+              {n >= 7 ? ' (م۴: ۲ جمجمه)' : ''}
+            </span>
+          ))}
+        </p>
+      </section>
+    </div>
+  )
+}
+
+function MapStage({
+  mode = 'lobby',
+  game,
+  mapBg,
+  inquiryEnabled,
+  inquiryReady,
+  inquiryHint,
+  missionLabel,
+  missionDisabled,
+  inquiryDisabled,
+  leaderName,
+  inquiryName,
+  leaderLabel,
+  leaderDisabled,
+  leaderHint,
+  timerHint,
+  rejectionCount,
+  rejectionBumpDisabled,
+  rejectionUndoDisabled,
+  climax,
+  onSettings,
+  onGuide,
+  onCycleMap,
+  onMission,
+  onInquiry,
+  onLeader,
+  onAbilities,
+  onTimer,
+  onEnd,
+  onBumpRejection,
+  onUndoRejection,
+  onAssassin,
+  onDeclareEvil,
+}: {
+  mode?: 'lobby'
+  game: GameState
+  mapBg: MapBgIndex
+  inquiryEnabled: boolean
+  inquiryReady: boolean
+  inquiryHint: string
+  missionLabel: string
+  missionDisabled: boolean
+  inquiryDisabled: boolean
+  leaderName: string | null
+  inquiryName: string | null
+  leaderLabel: string
+  leaderDisabled: boolean
+  leaderHint: string
+  timerHint: string
+  rejectionCount: number
+  rejectionBumpDisabled: boolean
+  rejectionUndoDisabled: boolean
+  climax: 'assassin' | 'evil' | 'reject' | null
+  onSettings: () => void
+  onGuide: () => void
+  onCycleMap: () => void
+  onMission: () => void
+  onInquiry: () => void
+  onLeader: () => void
+  onAbilities: () => void
+  onTimer: () => void
+  onEnd: () => void
+  onBumpRejection: () => void
+  onUndoRejection: () => void
+  onAssassin: () => void
+  onDeclareEvil: () => void
+}) {
+  const sizes =
+    game.missionSizes?.length === 5
+      ? game.missionSizes
+      : TEAM_SIZES[game.playerCount] ?? []
+  const bg = MAP_BACKGROUNDS[mapBg] ?? MAP_BACKGROUNDS[0]
+
+  return (
+    <section className={`map-stage map-stage--${mode} fade-in`} aria-label="میز بازی">
+      <img className="map-stage__bg" src={bg} alt="" draggable={false} />
+      <div className="map-stage__shade" aria-hidden />
+
+      <header className="map-stage__top">
+        <button type="button" className="map-stage__close" onClick={onSettings}>
+          تنظیمات
+        </button>
+        <p className="map-stage__mark">آوالون</p>
+        <div className="map-stage__top-actions">
+          <button type="button" className="map-stage__close" onClick={onCycleMap}>
+            نقشه
+          </button>
+          <button type="button" className="map-stage__close" onClick={onGuide}>
+            راهنما
+          </button>
+        </div>
+      </header>
+
+      <div className="map-stage__field">
+        <div className="map-stage__trail" aria-hidden>
+          <span className="map-stage__trail-line" />
+        </div>
+        <div className="map-stage__missions" aria-label="مأموریت‌ها">
+          {game.missions.map((status, i) => {
+            const twoFails = needsTwoFails(game.playerCount, i)
+            const current =
+              i === game.currentMission && game.phase === 'play'
+            return (
+              <div
+                key={i}
+                className={`map-token ${status} ${current ? 'is-current' : ''} ${
+                  twoFails ? 'needs-two' : ''
+                }`}
+              >
+                <div className="map-token__socket" aria-hidden>
+                  <span className="map-token__rim" />
+                  <span className="map-token__glow" />
+                </div>
+                <div className="map-token__gem">
+                  <img
+                    className="map-token__art"
+                    src={
+                      status === 'success'
+                        ? '/missions/success.jpg'
+                        : status === 'fail'
+                          ? '/missions/fail.jpg'
+                          : '/missions/pending.jpg'
+                    }
+                    alt=""
+                    draggable={false}
+                  />
+                  {status === 'pending' && (
+                    <span className="map-token__num">{toFa(i + 1)}</span>
+                  )}
+                </div>
+                <div className="map-token__labels">
+                  <span className="map-token__meta">
+                    {toFa(sizes[i] ?? 0)} نفر
+                  </span>
+                  {twoFails && <span className="map-token__two">۲ جمجمه</span>}
+                  {status === 'success' && (
+                    <span className="map-token__result is-good">پیروز</span>
+                  )}
+                  {status === 'fail' && (
+                    <span className="map-token__result is-evil">شکست</span>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        {(leaderName || inquiryName) && (
+          <div className="map-stage__status">
+            {leaderName && (
+              <div className="map-chip">
+                <span>لیدر</span>
+                <strong>{leaderName}</strong>
+              </div>
+            )}
+            {inquiryName && (
+              <div className="map-chip">
+                <span>استعلام</span>
+                <strong>{inquiryName}</strong>
+              </div>
+            )}
+          </div>
+        )}
+
+        {climax === 'assassin' && (
+          <div className="map-climax is-shot">
+            <p>شهر سه مأموریت برد</p>
+            <h3>شلیک اساسین</h3>
+            <button type="button" className="btn btn--primary" onClick={onAssassin}>
+              شروع شلیک
+            </button>
+          </div>
+        )}
+
+        {(climax === 'evil' || climax === 'reject') && (
+          <div className="map-climax is-evil">
+            <p>{climax === 'reject' ? '۵ بار رد تیم' : 'سه مأموریت شکست'}</p>
+            <h3>مافیا میز را برد</h3>
+            <button type="button" className="btn btn--primary" onClick={onDeclareEvil}>
+              اعلام پیروزی مافیا
+            </button>
+          </div>
+        )}
+
+        <div className="map-stage__dock">
+          <div className="map-dash">
+            <button
+              type="button"
+              className="map-action"
+              onClick={onLeader}
+              disabled={leaderDisabled}
+            >
+              <span className="map-action__label">{leaderLabel}</span>
+              <span className="map-action__desc">{leaderHint}</span>
+            </button>
+            <button type="button" className="map-action" onClick={onAbilities}>
+              <span className="map-action__label">نقش و توانایی</span>
+              <span className="map-action__desc">نقش و یارها</span>
+            </button>
+            {inquiryEnabled && (
+              <button
+                type="button"
+                className={`map-action ${inquiryReady ? 'is-ready' : ''}`}
+                onClick={onInquiry}
+                disabled={inquiryDisabled}
+              >
+                <span className="map-action__label">استعلام</span>
+                <span className="map-action__desc">{inquiryHint}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              className="map-action"
+              onClick={onMission}
+              disabled={missionDisabled}
+            >
+              <span className="map-action__label">{missionLabel}</span>
+              <span className="map-action__desc">خورشید / جمجمه</span>
+            </button>
+            <button type="button" className="map-action" onClick={onTimer}>
+              <span className="map-action__label">تایمر</span>
+              <span className="map-action__desc">{timerHint}</span>
+            </button>
+            <button
+              type="button"
+              className="map-action map-action--danger"
+              onClick={onEnd}
+            >
+              <span className="map-action__label">پایان بازی</span>
+              <span className="map-action__desc">افشای نقش‌ها</span>
+            </button>
+          </div>
+
+          <div className="map-stage__reject" aria-label="رد تیم">
+            <div className="map-stage__reject-head">
+              <p>رد پیشنهاد تیم</p>
+              <strong>
+                {rejectionCount === 0 ? 'خالی' : `${toFa(rejectionCount)} از ۵`}
+              </strong>
+            </div>
+            <div className="map-stage__reject-row">
+              {[1, 2, 3, 4, 5].map((n) => (
+                <span
+                  key={n}
+                  className={`map-reject ${rejectionCount >= n ? 'is-on' : ''} ${
+                    n === 5 ? 'is-fatal' : ''
+                  }`}
+                >
+                  {toFa(n)}
+                </span>
+              ))}
+            </div>
+            <div className="map-stage__reject-actions">
+              <button
+                type="button"
+                className="map-stage__close"
+                onClick={onBumpRejection}
+                disabled={rejectionBumpDisabled}
+              >
+                تیم رأی نیاورد
+              </button>
+              <button
+                type="button"
+                className="map-stage__close"
+                onClick={onUndoRejection}
+                disabled={rejectionUndoDisabled}
+              >
+                یکی کم کن
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -1463,29 +2365,80 @@ function ConfirmScreen({
   )
 }
 
-function MissionBoard({ game }: { game: GameState }) {
+function MissionBoard({
+  game,
+  onExpand,
+}: {
+  game: GameState
+  large?: boolean
+  onExpand?: () => void
+}) {
   const sizes =
     game.missionSizes?.length === 5
       ? game.missionSizes
       : TEAM_SIZES[game.playerCount] ?? []
-  return (
-    <div className="mission-board" aria-label="وضعیت مأموریت‌ها">
-      {game.missions.map((status, i) => (
-        <div
-          key={i}
-          className={`mission-dot ${status} ${i === game.currentMission && game.phase === 'play' ? 'is-current' : ''}`}
-        >
-          <span className="mission-dot__n">{toFa(i + 1)}</span>
-          <span className="mission-dot__size">{toFa(sizes[i] ?? 0)}</span>
-        </div>
-      ))}
+
+  const board = (
+    <div className="quest-board" aria-label="تخته مأموریت‌ها">
+      <div className="quest-board__veil" aria-hidden />
+      <div className="quest-board__missions">
+        {game.missions.map((status, i) => {
+          const twoFails = needsTwoFails(game.playerCount, i)
+          return (
+            <div
+              key={i}
+              className={`quest-seal ${status} ${
+                i === game.currentMission && game.phase === 'play' ? 'is-current' : ''
+              } ${twoFails ? 'needs-two' : ''}`}
+            >
+              <div className="quest-seal__ring">
+                <img
+                  className="quest-seal__art"
+                  src={
+                    status === 'success'
+                      ? '/missions/success.jpg'
+                      : status === 'fail'
+                        ? '/missions/fail.jpg'
+                        : '/missions/pending.jpg'
+                  }
+                  alt=""
+                  draggable={false}
+                />
+                {status === 'pending' && (
+                  <span className="quest-seal__n">{toFa(i + 1)}</span>
+                )}
+              </div>
+              <span className="quest-seal__size">{toFa(sizes[i] ?? 0)} نفر</span>
+              {twoFails && (
+                <span className="quest-seal__two" title="برای سوختن این مأموریت دو کارت جمجمه لازم است">
+                  ۲ جمجمه
+                </span>
+              )}
+            </div>
+          )
+        })}
+      </div>
     </div>
+  )
+
+  if (!onExpand) return board
+
+  return (
+    <button
+      type="button"
+      className="mission-board-wrap"
+      onClick={onExpand}
+      aria-label="بزرگ‌نمایی نقشه مأموریت‌ها"
+    >
+      {board}
+      <span className="mission-board-wrap__hint">برای نقشهٔ کامل ضربه بزن</span>
+    </button>
   )
 }
 
-function SunIcon() {
+function SunIcon({ size = 40 }: { size?: number }) {
   return (
-    <svg viewBox="0 0 48 48" width="40" height="40" aria-hidden>
+    <svg viewBox="0 0 48 48" width={size} height={size} aria-hidden>
       <circle cx="24" cy="24" r="10" fill="currentColor" />
       {[0, 45, 90, 135, 180, 225, 270, 315].map((deg) => (
         <rect
@@ -1503,9 +2456,9 @@ function SunIcon() {
   )
 }
 
-function SkullIcon() {
+function SkullIcon({ size = 40 }: { size?: number }) {
   return (
-    <svg viewBox="0 0 48 48" width="40" height="40" aria-hidden>
+    <svg viewBox="0 0 48 48" width={size} height={size} aria-hidden>
       <path
         d="M24 6c-10 0-18 7-18 16 0 6 3 11 8 14v6h6v-4h8v4h6v-6c5-3 8-8 8-14 0-9-8-16-18-16z"
         fill="currentColor"

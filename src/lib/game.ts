@@ -42,6 +42,29 @@ export interface GameState {
   missionSizes?: number[]
   currentMission: number
   vote: VoteRound | null
+  /** First mission leader (chosen by the table spinner). */
+  leaderId?: string | null
+  /** Initial / display name for first inquiry holder (kept in sync with holder). */
+  firstInquirerId?: string | null
+  /** Who currently holds the inquiry token. */
+  inquiryHolderId?: string | null
+  /** Players who already performed an inquiry — cannot be targeted later. */
+  inquiryHistoryIds?: string[]
+  /** How many side-inquiries have been completed. */
+  inquiriesDone?: number
+  /** Opening leader ceremony finished. */
+  leaderChosen?: boolean
+  /** Final winner after missions / assassin shot. */
+  winner?: 'good' | 'evil' | null
+  /** Who the assassin named as Merlin. */
+  assassinTargetId?: string | null
+  /** Assassin shot hit Merlin. */
+  assassinHit?: boolean | null
+  /**
+   * Rejected team proposals on the current mission (1–5).
+   * At 5, evil can win — caller must confirm (no auto-end).
+   */
+  teamRejections?: number
 }
 
 export function shuffle<T>(arr: T[]): T[] {
@@ -83,6 +106,145 @@ export function createGame(names: string[]): GameState {
     missionSizes: [...(TEAM_SIZES[count] ?? [2, 3, 2, 3, 3])],
     currentMission: 0,
     vote: null,
+    leaderId: null,
+    firstInquirerId: null,
+    inquiryHolderId: null,
+    inquiryHistoryIds: [],
+    inquiriesDone: 0,
+    leaderChosen: false,
+    winner: null,
+    assassinTargetId: null,
+    assassinHit: null,
+    teamRejections: 0,
+  }
+}
+
+/**
+ * Seat to the leader's physical right when players sit in list order
+ * clockwise around the table (facing center → right is previous index).
+ */
+export function seatRightOf(leaderIndex: number, count: number): number {
+  if (count <= 0) return 0
+  return (leaderIndex - 1 + count) % count
+}
+
+export function pickFirstInquirerId(
+  players: Player[],
+  leaderId: string,
+  mode: 'random' | 'rightOfLeader',
+): string {
+  const leaderIndex = players.findIndex((p) => p.id === leaderId)
+  if (leaderIndex < 0 || players.length === 0) {
+    return players[0]?.id ?? leaderId
+  }
+
+  if (mode === 'rightOfLeader') {
+    return players[seatRightOf(leaderIndex, players.length)]!.id
+  }
+
+  const others = players.filter((p) => p.id !== leaderId)
+  const pool = others.length > 0 ? others : players
+  return pool[Math.floor(Math.random() * pool.length)]!.id
+}
+
+export function assignLeader(
+  game: GameState,
+  leaderId: string,
+  firstInquirerId: string | null,
+): GameState {
+  const inquiryStarted =
+    (game.inquiriesDone ?? 0) > 0 || (game.inquiryHistoryIds?.length ?? 0) > 0
+
+  // Mid-game re-spin only moves the leader token; inquiry chain stays.
+  if (inquiryStarted) {
+    return {
+      ...game,
+      leaderId,
+      leaderChosen: true,
+    }
+  }
+
+  return {
+    ...game,
+    leaderId,
+    firstInquirerId,
+    inquiryHolderId: firstInquirerId,
+    inquiryHistoryIds: [],
+    inquiriesDone: 0,
+    leaderChosen: true,
+  }
+}
+
+export function completedMissions(game: GameState): number {
+  return game.missions.filter((m) => m !== 'pending').length
+}
+
+/** First inquiry after mission 2, then after each following mission. */
+export function canPerformInquiry(game: GameState): boolean {
+  if (!inquiryHolder(game)) return false
+  if (inquiryTargets(game).length === 0) return false
+  const done = game.inquiriesDone ?? 0
+  return completedMissions(game) >= 2 + done
+}
+
+export function inquiryHolder(game: GameState): Player | null {
+  const id = game.inquiryHolderId ?? game.firstInquirerId ?? null
+  if (!id) return null
+  return game.players.find((p) => p.id === id) ?? null
+}
+
+export function inquiryTargets(game: GameState): Player[] {
+  const holder = inquiryHolder(game)
+  if (!holder) return []
+  const blocked = new Set(
+    (game.inquiryHistoryIds ?? []).filter((id) =>
+      game.players.some((p) => p.id === id),
+    ),
+  )
+  return game.players.filter((p) => p.id !== holder.id && !blocked.has(p.id))
+}
+
+/** Drop stale inquiry IDs left over from an older session. */
+export function sanitizeInquiryState(game: GameState): GameState {
+  const ids = new Set(game.players.map((p) => p.id))
+  const history = (game.inquiryHistoryIds ?? []).filter((id) => ids.has(id))
+  let holderId = game.inquiryHolderId ?? game.firstInquirerId ?? null
+  if (holderId && !ids.has(holderId)) holderId = null
+
+  const done = Math.min(game.inquiriesDone ?? 0, history.length)
+
+  return {
+    ...game,
+    inquiryHistoryIds: history,
+    inquiryHolderId: holderId,
+    firstInquirerId: holderId,
+    inquiriesDone: done,
+  }
+}
+
+export function completeInquiry(
+  game: GameState,
+  targetId: string,
+): GameState | { error: string } {
+  const holder = inquiryHolder(game)
+  if (!holder) return { error: 'دارندهٔ استعلام مشخص نیست.' }
+  if (!canPerformInquiry(game)) {
+    return { error: 'الان نوبت استعلام نیست — بعد از مأموریت بعدی.' }
+  }
+  const allowed = inquiryTargets(game)
+  if (!allowed.some((p) => p.id === targetId)) {
+    return { error: 'این نفر را نمی‌شود استعلام کرد.' }
+  }
+
+  const history = [...(game.inquiryHistoryIds ?? [])]
+  if (!history.includes(holder.id)) history.push(holder.id)
+
+  return {
+    ...game,
+    inquiryHistoryIds: history,
+    inquiryHolderId: targetId,
+    firstInquirerId: targetId,
+    inquiriesDone: (game.inquiriesDone ?? 0) + 1,
   }
 }
 
@@ -236,11 +398,13 @@ export function startVote(
   game: GameState,
   teamSize: number,
 ): GameState | { error: string } {
-  if (game.phase !== 'play') return { error: 'الان نمی‌شود رأی داد.' }
+  if (game.phase !== 'play') return { error: 'الان نمی‌شود مأموریت زد.' }
   if (game.vote && !game.vote.revealed) {
-    return { error: 'رأی‌گیری فعلی هنوز تمام نشده.' }
+    return { error: 'مأموریت فعلی هنوز تمام نشده.' }
   }
-  if (teamSize < 2 || teamSize > 5) return { error: 'تعداد رأی باید ۲ تا ۵ باشد.' }
+  if (teamSize < 2 || teamSize > 5) {
+    return { error: 'تعداد اعضای مأموریت باید ۲ تا ۵ باشد.' }
+  }
 
   const missionIndex =
     game.missions.findIndex((m) => m === 'pending') === -1
@@ -258,6 +422,7 @@ export function startVote(
     ...game,
     currentMission: idx,
     missionSizes,
+    teamRejections: 0,
     vote: {
       missionIndex: idx,
       teamSize,
@@ -276,11 +441,11 @@ export function castVote(
   choice: VoteChoice,
 ): GameState | { error: string } {
   if (!game.vote || game.vote.revealed) {
-    return { error: 'رأی‌گیری فعال نیست.' }
+    return { error: 'مأموریت فعال نیست.' }
   }
   const slot = game.vote.slots.find((s) => s.number === slotNumber)
   if (!slot) return { error: 'این عدد وجود ندارد.' }
-  if (slot.vote) return { error: 'این عدد قبلاً رأی داده.' }
+  if (slot.vote) return { error: 'این عدد قبلاً انتخاب شده.' }
 
   return {
     ...game,
@@ -320,8 +485,8 @@ export function tallyVote(game: GameState): VoteTally | null {
 }
 
 export function revealVote(game: GameState): GameState | { error: string } {
-  if (!game.vote) return { error: 'رأی‌گیری‌ای نیست.' }
-  if (!allVotesIn(game)) return { error: 'هنوز همه رأی نداده‌اند.' }
+  if (!game.vote) return { error: 'مأموریتی در جریان نیست.' }
+  if (!allVotesIn(game)) return { error: 'هنوز همه کارت نداده‌اند.' }
   return { ...game, vote: { ...game.vote, revealed: true } }
 }
 
@@ -354,8 +519,65 @@ export function endGameReveal(game: GameState): GameState {
   return { ...game, phase: 'ended', vote: null }
 }
 
+export function resolveAssassinShot(
+  game: GameState,
+  targetId: string,
+): GameState | { error: string } {
+  const target = game.players.find((p) => p.id === targetId)
+  if (!target) return { error: 'بازیکن پیدا نشد.' }
+  const hit = target.roleId === 'merlin'
+  return {
+    ...game,
+    phase: 'ended',
+    vote: null,
+    assassinTargetId: targetId,
+    assassinHit: hit,
+    winner: hit ? 'evil' : 'good',
+  }
+}
+
+export function declareEvilWin(game: GameState): GameState {
+  return {
+    ...game,
+    phase: 'ended',
+    vote: null,
+    winner: 'evil',
+    assassinTargetId: null,
+    assassinHit: null,
+  }
+}
+
+/** Mark a proposed team as rejected (round-table vote failed). Caps at 5. */
+export function rejectTeamProposal(
+  game: GameState,
+): GameState | { error: string } {
+  if (game.phase !== 'play') return { error: 'بازی در جریان نیست.' }
+  if (game.vote && !game.vote.revealed) {
+    return { error: 'اول مأموریت فعلی را تمام کنید.' }
+  }
+  const next = Math.min(5, (game.teamRejections ?? 0) + 1)
+  return { ...game, teamRejections: next }
+}
+
+export function undoTeamRejection(
+  game: GameState,
+): GameState | { error: string } {
+  if (game.phase !== 'play') return { error: 'بازی در جریان نیست.' }
+  const next = Math.max(0, (game.teamRejections ?? 0) - 1)
+  return { ...game, teamRejections: next }
+}
+
 export function missionSummary(game: GameState) {
   const success = game.missions.filter((m) => m === 'success').length
   const fail = game.missions.filter((m) => m === 'fail').length
   return { success, fail }
+}
+
+export type ClimaxKind = 'assassin' | 'evil' | null
+
+export function climaxKind(game: GameState): ClimaxKind {
+  const { success, fail } = missionSummary(game)
+  if (fail >= 3 || (game.teamRejections ?? 0) >= 5) return 'evil'
+  if (success >= 3) return 'assassin'
+  return null
 }
