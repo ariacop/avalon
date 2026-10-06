@@ -1137,29 +1137,41 @@ button {
   z-index: 2;
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
-/* Landscape strip of missions across portrait phone width */
+/* Mission strip — flow layout (not % of tall screens) */
 .map-stage__missions {
-  position: absolute;
-  left: 50%;
-  top: 28%;
-  transform: translate(-50%, -50%);
+  position: relative;
+  left: auto;
+  top: auto;
+  transform: none;
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 4px;
   align-items: start;
   width: min(100%, 440px);
+  margin: 4px auto 0;
   padding: 0 2px;
+  flex-shrink: 0;
 }
 
 .map-stage__trail {
-  position: absolute;
-  left: 4%;
-  right: 4%;
-  top: 28%;
+  position: relative;
+  left: auto;
+  right: auto;
+  top: auto;
+  width: min(100%, 440px);
+  margin: 10px auto -14px;
   height: 0;
   pointer-events: none;
+  flex-shrink: 0;
 }
 
 .map-stage__trail-line {
@@ -1392,66 +1404,69 @@ button {
 }
 
 .map-stage__status {
-  position: absolute;
-  left: 50%;
-  top: 42%;
-  transform: translateX(-50%);
+  position: relative;
+  left: auto;
+  top: auto;
+  transform: none;
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 8px;
-  width: min(100%, 360px);
-  padding: 0 6px;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
   z-index: 3;
+  flex-shrink: 0;
 }
 
 .map-chip {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
+  gap: 6px;
+  padding: 5px 10px;
   border-radius: 999px;
-  background: rgba(10, 8, 6, 0.7);
+  background: rgba(10, 8, 6, 0.78);
   border: 1px solid rgba(212, 175, 105, 0.35);
   backdrop-filter: blur(5px);
 }
 
 .map-chip span {
-  font-size: 0.68rem;
+  font-size: 0.65rem;
   color: rgba(240, 217, 160, 0.8);
 }
 
 .map-chip strong {
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   color: var(--ink);
 }
 
 .map-climax {
-  position: absolute;
-  left: 50%;
-  top: 48%;
-  transform: translateX(-50%);
+  position: relative;
+  left: auto;
+  top: auto;
+  transform: none;
   z-index: 4;
   width: min(100%, 340px);
-  padding: 12px 14px;
-  border-radius: 16px;
+  margin: 0 auto;
+  padding: 10px 12px;
+  border-radius: 14px;
   text-align: center;
   background: rgba(10, 8, 6, 0.82);
   border: 1px solid rgba(212, 175, 105, 0.35);
   backdrop-filter: blur(8px);
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5);
+  flex-shrink: 0;
 }
 
 .map-climax p {
   margin: 0 0 4px;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   color: var(--ink-muted);
 }
 
 .map-climax h3 {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   font-family: var(--display);
-  font-size: 1.15rem;
+  font-size: 1.05rem;
   color: var(--gold-bright);
 }
 
@@ -1464,16 +1479,18 @@ button {
 }
 
 .map-stage__dock {
-  position: absolute;
-  left: 50%;
-  bottom: max(8px, env(safe-area-inset-bottom, 0px));
-  transform: translateX(-50%);
+  position: relative;
+  left: auto;
+  bottom: auto;
+  transform: none;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
   width: min(100%, 400px);
-  padding: 0 6px;
+  margin: auto auto 0;
+  padding: 0 2px 2px;
   z-index: 3;
+  flex-shrink: 0;
 }
 
 .map-dash {
@@ -1637,6 +1654,54 @@ button {
   .map-token__two,
   .map-token__result {
     font-size: 0.6rem;
+  }
+}
+
+@media (max-height: 740px) {
+  .map-token__gem,
+  .map-token__socket {
+    width: clamp(44px, 12vw, 56px);
+    height: clamp(44px, 12vw, 56px);
+  }
+
+  .map-token__num {
+    font-size: 1.1rem;
+  }
+
+  .map-token__labels {
+    min-height: 0;
+    gap: 2px;
+  }
+
+  .map-action {
+    min-height: 40px;
+    padding: 5px 8px;
+  }
+
+  .map-action__desc {
+    display: none;
+  }
+
+  .map-stage__reject {
+    padding: 6px 7px 5px;
+  }
+
+  .map-stage__reject-actions .map-stage__close {
+    padding: 5px 10px;
+    font-size: 0.72rem;
+  }
+}
+
+@media (max-height: 640px) {
+  .map-token__meta,
+  .map-token__two,
+  .map-token__result {
+    font-size: 0.5rem;
+    padding: 1px 4px;
+  }
+
+  .map-dash {
+    gap: 5px;
   }
 }
 

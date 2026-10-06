@@ -2200,23 +2200,6 @@ function MapStage({
           })}
         </div>
 
-        {(leaderName || inquiryName) && (
-          <div className="map-stage__status">
-            {leaderName && (
-              <div className="map-chip">
-                <span>لیدر</span>
-                <strong>{leaderName}</strong>
-              </div>
-            )}
-            {inquiryName && (
-              <div className="map-chip">
-                <span>استعلام</span>
-                <strong>{inquiryName}</strong>
-              </div>
-            )}
-          </div>
-        )}
-
         {climax === 'assassin' && (
           <div className="map-climax is-shot">
             <p>شهر سه مأموریت برد</p>
@@ -2238,6 +2221,22 @@ function MapStage({
         )}
 
         <div className="map-stage__dock">
+          {(leaderName || inquiryName) && (
+            <div className="map-stage__status">
+              {leaderName && (
+                <div className="map-chip">
+                  <span>لیدر</span>
+                  <strong>{leaderName}</strong>
+                </div>
+              )}
+              {inquiryName && (
+                <div className="map-chip">
+                  <span>استعلام</span>
+                  <strong>{inquiryName}</strong>
+                </div>
+              )}
+            </div>
+          )}
           <div className="map-dash">
             <button
               type="button"
